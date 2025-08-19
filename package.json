@@ -1,0 +1,23 @@
+{
+  "name": "web-fetch-mcp",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js",
+    "start": "node build/index.js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^24.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.3",
+    "hono": "^4.9.2",
+    "install": "^0.13.0",
+    "zod": "^4.0.17"
+  }
+}
