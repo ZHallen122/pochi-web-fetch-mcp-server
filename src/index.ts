@@ -1,5 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Hono } from "hono";
+import { randomUUID } from "node:crypto";
+import { toFetchResponse, toReqRes } from "fetch-to-node";
 import { z } from "zod";
 
 const server = new McpServer({
@@ -10,90 +13,100 @@ const server = new McpServer({
   },
 });
 
-server.tool(
-  "fetch",
-  "Fetch content from a URL",
-  {
-    url: z.string().describe("The URL to fetch"),
-    method: z
-      .enum(["GET", "POST", "PUT", "DELETE", "PATCH"])
-      .default("GET")
-      .describe("HTTP method"),
-    headers: z
-      .record(z.string(), z.string())
-      .optional()
-      .describe("HTTP headers"),
-    body: z
-      .string()
-      .optional()
-      .describe("Request body for POST/PUT/PATCH requests"),
-  },
-  async ({ url, method, headers, body }) => {
+async function runServer() {
+  const app = new Hono();
+
+  // Configure MCP endpoint
+  app.post("/mcp", async (c) => {
+    console.log("Received POST MCP request");
+
+    const body = await c.req.json();
+
     try {
-      const response = await fetch(url, {
-        method,
-        headers: {
-          "User-Agent": "web-fetch-mcp/1.0.0",
-          ...headers,
-        },
-        body: method !== "GET" && method !== "DELETE" ? body : undefined,
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        enableJsonResponse: true,
       });
 
-      const contentType = response.headers.get("content-type") || "";
-      const isJson = contentType.includes("application/json");
-      const isText =
-        contentType.includes("text/") ||
-        contentType.includes("application/json");
+      const { req, res } = toReqRes(c.req.raw);
+      res.on("close", () => {
+        transport.close();
+        server.close();
+      });
 
-      let responseBody;
-      if (isJson) {
-        responseBody = await response.json();
-      } else if (isText) {
-        responseBody = await response.text();
-      } else {
-        responseBody = `Binary content (${contentType})`;
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                status: response.status,
-                statusText: response.statusText,
-                headers: Object.fromEntries(response.headers.entries()),
-                body: responseBody,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+      return await toFetchResponse(res);
     } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching ${url}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+      console.error("Error handling MCP request:", error);
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          error: {
+            code: -32603,
+            message: "Internal server error",
           },
-        ],
-        isError: true,
-      };
+          id: null,
+        },
+        500
+      );
     }
-  }
-);
+  });
 
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Web Fetch MCP Server running on stdio");
+  const port = process.env.PORT || 8000;
+  console.log(`Web Fetch MCP Server running on http://localhost:${port}`);
+
+  return { fetch: app.fetch };
 }
 
-runServer().catch((error) => {
-  console.error("Server error:", error);
-  process.exit(1);
-});
+// Start the server
+runServer()
+  .then(async ({ fetch }) => {
+    const port = process.env.PORT || 8000;
+
+    // Create a simple HTTP server for Node.js
+    const { createServer } = await import("node:http");
+
+    const server = createServer(async (req, res) => {
+      // Collect request body
+      let body: string | undefined;
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        body = Buffer.concat(chunks).toString();
+      }
+
+      const request = new Request(`http://localhost:${port}${req.url}`, {
+        method: req.method,
+        headers: req.headers as HeadersInit,
+        body: body,
+      });
+
+      const response = await fetch(request);
+
+      res.statusCode = response.status;
+      response.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+
+      if (response.body) {
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+      }
+      res.end();
+    });
+
+    server.listen(port, () => {
+      console.log(`Server listening on port ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Server error:", error);
+    process.exit(1);
+  });
