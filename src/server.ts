@@ -4,22 +4,23 @@ import fetch from "node-fetch";
 import { Environment, FetchToolInput } from "./types.js";
 
 export function createServer(env: Environment): McpServer {
-  const server = new McpServer({
-    name: "web-fetch-mcp",
-    version: "1.0.0",
-    capabilities: {
-      tools: {},
+  const server = new McpServer(
+    {
+      name: "web-fetch-mcp",
+      version: "1.0.0",
     },
-  });
+    { capabilities: { tools: {} } }
+  );
+
+  // Added for extra debuggability
+  server.server.onerror = console.error.bind(console);
 
   // Add the fetch tool
-  server.registerTool(
+  server.tool(
     "fetch",
+    "Fetch a URL and convert it to markdown using Jina",
     {
-      description: "Fetch a URL and convert it to markdown using Jina",
-      inputSchema: {
-        url: z.string().describe("The URL to fetch and convert to markdown"),
-      },
+      url: z.string().describe("The URL to fetch and convert to markdown"),
     },
     async ({ url }: FetchToolInput) => {
       try {
@@ -50,7 +51,6 @@ export function createServer(env: Environment): McpServer {
               text: content,
             },
           ],
-          isError: false,
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
