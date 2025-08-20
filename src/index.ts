@@ -1,166 +1,81 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Hono } from "hono";
-import { randomUUID } from "node:crypto";
 import { toFetchResponse, toReqRes } from "fetch-to-node";
-import { z } from "zod";
-import fetch from "node-fetch";
 import dotenv from "dotenv";
+import { Environment, CloudflareWorkerContext } from "./types.js";
+import { createServer } from "./server.js";
+import { createTransport } from "./transport.js";
 
-// Load environment variables
+// Load environment variables for local development
 dotenv.config();
 
-const server = new McpServer({
-  name: "web-fetch-mcp",
-  version: "1.0.0",
-  capabilities: {
-    tools: {},
-  },
-});
+// Global variable to store environment
+let globalEnv: Environment | null = null;
 
-// Add the fetch tool
-server.registerTool(
-  "fetch",
-  {
-    description: "Fetch a URL and convert it to markdown using Jina",
-    inputSchema: {
-      url: z.string().describe("The URL to fetch and convert to markdown"),
-    },
-  },
-  async ({ url }: { url: string }) => {
-    try {
-      const jinaUrl = `https://r.jina.ai/${url}`;
-      const token = process.env.JINA_TOKEN;
-      
-      if (!token) {
-        throw new Error("JINA_TOKEN environment variable is not set");
-      }
-      
-      const response = await fetch(jinaUrl, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const markdown = await response.text();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: markdown,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching URL: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-        isError: true,
-      };
+// Initialize app and transport globally
+const app = new Hono();
+const transport = createTransport();
+
+// Global server instance
+let mcpServer: McpServer | null = null;
+let serverConnected = false;
+
+async function initializeServer(env: Environment) {
+  if (!serverConnected) {
+    if (!mcpServer) {
+      mcpServer = createServer(env);
     }
+    await mcpServer.connect(transport);
+    serverConnected = true;
+    console.log("MCP Server connected to transport");
   }
-);
-
-async function runServer() {
-  const app = new Hono();
-
-  // Create transport and connect server once
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: true,
-  });
-
-  await server.connect(transport);
-
-  // Configure MCP endpoint
-  app.post("/mcp", async (c) => {
-    console.log("Received POST MCP request");
-
-    try {
-      const { req, res } = toReqRes(c.req.raw);
-      const body = await c.req.json();
-      
-      await transport.handleRequest(req, res, body);
-      return await toFetchResponse(res);
-    } catch (error) {
-      console.error("Error handling MCP request:", error);
-      return c.json(
-        {
-          jsonrpc: "2.0",
-          error: {
-            code: -32603,
-            message: "Internal server error",
-          },
-          id: null,
-        },
-        500
-      );
-    }
-  });
-
-  const port = process.env.PORT || 8000;
-  console.log(`Web Fetch MCP Server running on http://localhost:${port}`);
-
-  return { fetch: app.fetch };
 }
 
-// Start the server
-runServer()
-  .then(async ({ fetch }) => {
-    const port = process.env.PORT || 8000;
+// Configure MCP endpoint
+app.post("/mcp", async (c) => {
+  console.log("Received POST MCP request");
 
-    // Create a simple HTTP server for Node.js
-    const { createServer } = await import("node:http");
+  try {
+    // Get env from context (for Cloudflare Workers)
+    const env = c.env || globalEnv || {};
+    await initializeServer(env as Environment);
 
-    const server = createServer(async (req, res) => {
-      // Collect request body
-      let body: string | undefined;
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) {
-          chunks.push(chunk);
-        }
-        body = Buffer.concat(chunks).toString();
-      }
+    const { req, res } = toReqRes(c.req.raw);
+    const body = await c.req.json();
 
-      const request = new Request(`http://localhost:${port}${req.url}`, {
-        method: req.method,
-        headers: req.headers as HeadersInit,
-        body: body,
-      });
+    await transport.handleRequest(req, res, body);
+    return await toFetchResponse(res);
+  } catch (error) {
+    console.error("Error handling MCP request:", error);
+    return c.json(
+      {
+        jsonrpc: "2.0",
+        error: {
+          code: -32603,
+          message: "Internal server error",
+        },
+        id: null,
+      },
+      500
+    );
+  }
+});
 
-      const response = await fetch(request);
+// Add a health check endpoint
+app.get("/", (c) => {
+  return c.json({ status: "ok", message: "Web Fetch MCP Server is running" });
+});
 
-      res.statusCode = response.status;
-      response.headers.forEach((value, key) => {
-        res.setHeader(key, value);
-      });
-
-      if (response.body) {
-        const reader = response.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-        }
-      }
-      res.end();
-    });
-
-    server.listen(port, () => {
-      console.log(`Server listening on port ${port}`);
-    });
-  })
-  .catch((error) => {
-    console.error("Server error:", error);
-    process.exit(1);
-  });
+// Export default for Cloudflare Workers
+export default {
+  async fetch(
+    request: Request,
+    env: Environment,
+    ctx: CloudflareWorkerContext
+  ): Promise<Response> {
+    // Store env globally for access in handlers
+    globalEnv = env;
+    // Type assertion needed for Hono compatibility
+    return app.fetch(request, env, ctx as any);
+  },
+};
