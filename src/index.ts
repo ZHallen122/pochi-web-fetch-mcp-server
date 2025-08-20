@@ -4,6 +4,11 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { toFetchResponse, toReqRes } from "fetch-to-node";
 import { z } from "zod";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+
+// Load environment variables
+dotenv.config();
 
 const server = new McpServer({
   name: "web-fetch-mcp",
@@ -13,28 +18,77 @@ const server = new McpServer({
   },
 });
 
+// Add the fetch tool
+server.registerTool(
+  "fetch",
+  {
+    description: "Fetch a URL and convert it to markdown using Jina",
+    inputSchema: {
+      url: z.string().describe("The URL to fetch and convert to markdown"),
+    },
+  },
+  async ({ url }: { url: string }) => {
+    try {
+      const jinaUrl = `https://r.jina.ai/${url}`;
+      const token = process.env.JINA_TOKEN;
+      
+      if (!token) {
+        throw new Error("JINA_TOKEN environment variable is not set");
+      }
+      
+      const response = await fetch(jinaUrl, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const markdown = await response.text();
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: markdown,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching URL: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
 async function runServer() {
   const app = new Hono();
+
+  // Create transport and connect server once
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableJsonResponse: true,
+  });
+
+  await server.connect(transport);
 
   // Configure MCP endpoint
   app.post("/mcp", async (c) => {
     console.log("Received POST MCP request");
 
-    const body = await c.req.json();
-
     try {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
-      });
-
       const { req, res } = toReqRes(c.req.raw);
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-
-      await server.connect(transport);
+      const body = await c.req.json();
+      
       await transport.handleRequest(req, res, body);
       return await toFetchResponse(res);
     } catch (error) {
