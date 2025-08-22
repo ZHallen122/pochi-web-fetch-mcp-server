@@ -15,9 +15,11 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@ai-sdk/google": "^2.0.7",
     "@cloudflare/workers-types": "^4.20250820.0",
     "@modelcontextprotocol/sdk": "^1.17.3",
     "@types/node-fetch": "^2.6.13",
+    "ai": "^5.0.20",
     "dotenv": "^17.2.1",
     "fetch-to-node": "^2.1.0",
     "hono": "^4.9.2",

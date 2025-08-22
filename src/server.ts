@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import fetch from "node-fetch";
+import { google, createGoogleGenerativeAI } from "@ai-sdk/google";
+import { generateText } from "ai";
 import { Environment, FetchToolInput } from "./types.js";
 
 export function createServer(env: Environment): McpServer {
@@ -18,47 +19,63 @@ export function createServer(env: Environment): McpServer {
   // Add the fetch tool
   server.tool(
     "fetch",
-    "Fetch a URL and convert it to markdown using Jina",
+    "Fetch a URL and analyze its content using Google Gemini with URL Context",
     {
-      url: z.string().describe("The URL to fetch and convert to markdown"),
+      url: z.string().describe("The URL to fetch and analyze"),
     },
-    async ({ url }: FetchToolInput) => {
+    async ({ url }: FetchToolInput & { prompt?: string }) => {
       try {
-        const jinaUrl = `https://r.jina.ai/${url}`;
-        // Try to get token from Cloudflare Workers env first, then fallback to process.env
-        const token = env?.JINA_TOKEN || process.env.JINA_TOKEN;
-        
-        if (!token) {
-          throw new Error("JINA_TOKEN environment variable is not set");
+        // Try to get API key from Cloudflare Workers env first, then fallback to process.env
+        const apiKey =
+          env?.GOOGLE_GENERATIVE_AI_API_KEY ||
+          process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+
+        if (!apiKey) {
+          throw new Error(
+            "GOOGLE_GENERATIVE_AI_API_KEY environment variable is not set"
+          );
         }
-        
-        const response = await fetch(jinaUrl, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
+
+        // Use default prompt if none provided
+        const analysisPrompt = `Please fetch the content from this URL and return it in markdown format: ${url}`;
+
+        const googleAI = createGoogleGenerativeAI({
+          apiKey: apiKey,
         });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const content = await response.text();
-        
+
+        const { text, providerMetadata } = await generateText({
+          model: googleAI("gemini-2.5-flash"),
+          prompt: analysisPrompt,
+          tools: {
+            url_context: google.tools.urlContext({}),
+          },
+        });
+
+        // Extract metadata for debugging/logging
+        const metadata = providerMetadata?.google;
+        const urlContextMetadata = metadata?.urlContextMetadata;
+        const groundingMetadata = metadata?.groundingMetadata;
+
         return {
           content: [
             {
               type: "text",
-              text: content,
+              text: text,
             },
           ],
+          metadata: {
+            urlContextMetadata,
+            groundingMetadata,
+          },
         };
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
         return {
           content: [
             {
               type: "text",
-              text: `Error fetching URL: ${errorMessage}`,
+              text: `Error analyzing URL: ${errorMessage}`,
             },
           ],
           isError: true,

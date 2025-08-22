@@ -1,7 +1,7 @@
 // Type definitions for the Web Fetch MCP Server
 
 export interface Environment {
-  JINA_TOKEN?: string;
+  GOOGLE_GENERATIVE_AI_API_KEY?: string;
   PORT?: string;
 }
 
